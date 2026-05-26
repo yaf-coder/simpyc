@@ -8,13 +8,16 @@ INCS    := -I$(ROOT)/include
 LIB     := $(ROOT)/libsimpyc.a
 
 .PHONY: all clean
-all: factory
+all: factory micro
 
 factory: factory.c $(LIB)
 	$(CC) $(CFLAGS) $(INCS) -o $@ factory.c $(LIB)
+
+micro: micro.c $(LIB)
+	$(CC) $(CFLAGS) $(INCS) -o $@ micro.c $(LIB)
 
 $(LIB):
 	$(MAKE) -C $(ROOT) lib
 
 clean:
-	rm -f factory
+	rm -f factory micro
