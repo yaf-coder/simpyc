@@ -14,14 +14,14 @@ typedef struct cond_state {
 static void cond_cb(sim_event_t *ev, void *user) {
     (void)ev;
     cond_state_t *s = (cond_state_t *)user;
-    if (sim_event_triggered(s->out)) return;     /* already resolved */
     s->n_fired++;
-    int done = s->any ? (s->n_fired >= 1)
-                      : (s->n_fired >= s->n_total);
-    if (done) {
-        sim_event_succeed(s->out, NULL);
-        /* state is leaked-with-env; cleanup happens at env_destroy. */
+    if (!sim_event_triggered(s->out)) {
+        int done = s->any ? (s->n_fired >= 1)
+                          : (s->n_fired >= s->n_total);
+        if (done) sim_event_succeed(s->out, NULL);
     }
+    /* All inputs have fired now — no more dereferences possible. */
+    if (s->n_fired >= s->n_total) free(s);
 }
 
 static sim_event_t *make_cond(sim_env_t *env, sim_event_t * const *evs,
@@ -41,6 +41,7 @@ static sim_event_t *make_cond(sim_env_t *env, sim_event_t * const *evs,
                    : (s->n_fired >= s->n_total);
     if (done) {
         sim_event_succeed(out, NULL);
+        if (s->n_fired >= s->n_total) free(s);
         return out;
     }
     /* Subscribe to the rest. Already-processed events fire cb

@@ -214,9 +214,8 @@ static void store_producer(sim_process_t *self, void *arg) {
 static void store_consumer(sim_process_t *self, void *arg) {
     st_arg_t *a = (st_arg_t *)arg;
     for (int i = 0; i < 5; i++) {
-        sim_event_t *g = sim_store_get(a->s);
-        sim_yield(self, g);
-        item_sum += (int)(intptr_t)sim_event_value(g);
+        void *item = sim_yield(self, sim_store_get(a->s));
+        item_sum += (int)(intptr_t)item;
     }
 }
 

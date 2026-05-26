@@ -48,6 +48,9 @@ sim_event_t *sim_timeout_v(sim_env_t *env, double delay, void *value) {
     if (!e) return NULL;
     e->value = value;
     e->state = SIM_EV_TRIGGERED;
+    /* Timeouts have no externally-visible identity beyond their value,
+     * which sim_yield surfaces directly. Safe to recycle post-process. */
+    e->recyclable = 1;
     _sim_event_schedule(e, delay, SIM_PRIO_NORMAL);
     return e;
 }
@@ -99,5 +102,12 @@ void _sim_event_run_callbacks(sim_event_t *e) {
         n->fn(e, n->user);
         free(n);
         n = next;
+    }
+    /* Return recyclable events to the pool so long simulations don't
+     * grow without bound. Caller must not touch e after this. */
+    if (e->recyclable) {
+        sim_env_t *env = e->env;
+        e->free_next = env->event_pool;
+        env->event_pool = e;
     }
 }

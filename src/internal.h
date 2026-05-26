@@ -32,7 +32,8 @@ struct sim_event {
     const char *fail_reason;  /* NULL on success */
     uint8_t    state;
     uint8_t    ok;            /* 1 succeeded, 0 failed */
-    uint8_t    pad[6];
+    uint8_t    recyclable;    /* return to env pool after processing */
+    uint8_t    pad[5];
     struct sim_event *free_next;  /* per-env pool free list */
     struct sim_event *all_next;   /* per-env "all allocated" list */
 };

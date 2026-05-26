@@ -74,6 +74,7 @@ static void try_wake_puts(sim_container_t *c) {
 
 sim_event_t *sim_container_put(sim_container_t *c, double amount) {
     sim_event_t *ev = _sim_event_alloc(c->env);
+    ev->recyclable = 1;
     if (!c->put_head && c->level + amount <= c->capacity) {
         c->level += amount;
         sim_event_succeed(ev, c);
@@ -86,6 +87,7 @@ sim_event_t *sim_container_put(sim_container_t *c, double amount) {
 
 sim_event_t *sim_container_get(sim_container_t *c, double amount) {
     sim_event_t *ev = _sim_event_alloc(c->env);
+    ev->recyclable = 1;
     if (!c->get_head && amount <= c->level) {
         c->level -= amount;
         sim_event_succeed(ev, c);

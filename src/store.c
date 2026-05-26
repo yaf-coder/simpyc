@@ -72,6 +72,7 @@ static void waiter_push(waiter_node_t **head, waiter_node_t **tail,
 
 sim_event_t *sim_store_put(sim_store_t *s, void *item) {
     sim_event_t *ev = _sim_event_alloc(s->env);
+    ev->recyclable = 1;
 
     /* Hand directly to a waiting get if any. */
     if (s->get_head) {
@@ -95,6 +96,7 @@ sim_event_t *sim_store_put(sim_store_t *s, void *item) {
 
 sim_event_t *sim_store_get(sim_store_t *s) {
     sim_event_t *ev = _sim_event_alloc(s->env);
+    ev->recyclable = 1;
 
     if (s->count > 0) {
         void *item = item_pop(s);

@@ -65,9 +65,20 @@ size_t sim_run(sim_env_t *env) {
 }
 
 size_t sim_run_until(sim_env_t *env, double until) {
+    /* Mimic SimPy: behave as if a sentinel was scheduled at
+     * (until, URGENT, stop_seq). Process events strictly before the
+     * sentinel — so NORMAL events at exactly time=until don't fire. */
     size_t n = 0;
+    uint64_t stop_seq = env->next_seq++;
     heap_entry_t he;
-    while (heap_peek(&env->heap, &he) == 0 && he.time <= until) {
+    while (heap_peek(&env->heap, &he) == 0) {
+        int before;
+        if      (he.time     < until)            before = 1;
+        else if (he.time     > until)            before = 0;
+        else if (he.priority < SIM_PRIO_URGENT)  before = 1;
+        else if (he.priority > SIM_PRIO_URGENT)  before = 0;
+        else                                     before = (he.seq < stop_seq);
+        if (!before) break;
         if (sim_step(env) < 0) break;
         n++;
     }

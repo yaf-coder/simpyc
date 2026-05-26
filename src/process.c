@@ -36,13 +36,14 @@ static void waiter_cb(sim_event_t *ev, void *user) {
     schedule_resume(p, sim_event_value(ev));
 }
 
-/* Schedule the process for resumption at current time, normal priority. */
+/* Schedule the process for resumption at current time, normal priority.
+ * The resume event is internal — the user never sees it — so it's
+ * always recyclable. */
 static void schedule_resume(sim_process_t *p, void *value) {
     p->resume_value = value;
     sim_event_t *r = _sim_event_alloc(p->env);
     r->state = SIM_EV_TRIGGERED;
-    /* Add the resume callback before scheduling (callback list isn't
-     * scanned until run-time). */
+    r->recyclable = 1;
     sim_event_on(r, resume_cb, p);
     _sim_event_schedule(r, 0.0, SIM_PRIO_NORMAL);
 }

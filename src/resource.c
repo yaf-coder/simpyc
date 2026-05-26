@@ -56,7 +56,6 @@ sim_event_t *sim_resource_request(sim_resource_t *r) {
 }
 
 void sim_resource_release(sim_resource_t *r, sim_event_t *req) {
-    (void)req;     /* req identifies the holder but we count by ref */
     if (r->in_use == 0) return;
     if (r->head) {
         req_node_t *n = r->head;
@@ -68,6 +67,12 @@ void sim_resource_release(sim_resource_t *r, sim_event_t *req) {
         /* in_use stays the same: handed off. */
     } else {
         r->in_use--;
+    }
+    /* The user is done with `req` once they call release. Return it
+     * to the env pool. */
+    if (req && sim_event_processed(req)) {
+        req->free_next = r->env->event_pool;
+        r->env->event_pool = req;
     }
 }
 
