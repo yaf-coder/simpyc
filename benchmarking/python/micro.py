@@ -59,6 +59,17 @@ def b_process_spawn(n):
         env.process(noop())
     env.run()
 
+def b_process_churn(n):
+    """Spawn-wait-die-respawn N times. Mirrors the C process-churn bench."""
+    env = simpy.Environment()
+    def noop():
+        if False: yield
+    def spawner():
+        for _ in range(n):
+            yield env.process(noop())
+    env.process(spawner())
+    env.run()
+
 def b_resource(n):
     env = simpy.Environment()
     r = simpy.Resource(env, 1)
@@ -192,6 +203,7 @@ BENCHES = [
     ("event-succeed",       b_event_succeed,       1.0),
     ("callback",            b_callback,            1.0),
     ("process-spawn",       b_process_spawn,       0.1),
+    ("process-churn",       b_process_churn,       1.0),
     ("resource",            b_resource,            1.0),
     ("priority-resource",   b_priority_resource,   1.0),
     ("preemptive-resource", b_preemptive_resource, 1.0),

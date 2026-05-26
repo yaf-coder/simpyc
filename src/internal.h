@@ -10,11 +10,13 @@
 
 /* --- Callbacks ----------------------------------------------------- */
 
-typedef struct cb_node {
+/* (fn, user) tuple stored contiguously in a dynamic array per event.
+ * Replaces the older per-callback linked-list node — avoids one malloc
+ * per subscription. */
+typedef struct cb_pair {
     sim_callback_fn fn;
     void           *user;
-    struct cb_node *next;
-} cb_node_t;
+} cb_pair_t;
 
 /* --- Events -------------------------------------------------------- */
 
@@ -26,8 +28,9 @@ enum {
 
 struct sim_event {
     sim_env_t *env;
-    cb_node_t *callbacks;     /* singly-linked, head */
-    cb_node_t *callbacks_tail;
+    cb_pair_t *cbs;           /* malloc'd; grows geometrically */
+    uint32_t   cb_cap;
+    uint32_t   cb_len;
     void      *value;
     const char *fail_reason;  /* NULL on success */
     uint8_t    state;

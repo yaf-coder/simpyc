@@ -17,7 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SIM_DEFAULT_STACK   (64 * 1024)   /* 64 KiB; tune per-workload */
+/* 16 KiB default; SimPy-style processes rarely need more than ~1 KiB.
+ * Bigger stacks force malloc to take the slow path and inflate spawn
+ * cost. If your process bodies use deep recursion or large stack
+ * arrays, fork the library and bump this. */
+#define SIM_DEFAULT_STACK   (16 * 1024)
 
 static void schedule_resume(sim_process_t *p, void *value);
 
@@ -69,7 +73,7 @@ static void schedule_resume(sim_process_t *p, void *value) {
     _sim_event_schedule(r, 0.0, SIM_PRIO_NORMAL);
 }
 
-/* Bottom-of-stack entry. user-fn -> done event -> host. */
+/* Bottom-of-stack entry. user-fn -> done event -> recycle -> host. */
 static void process_entry(void *arg) {
     sim_process_t *p = (sim_process_t *)arg;
     p->state = SIM_PROC_RUNNING;
@@ -78,28 +82,52 @@ static void process_entry(void *arg) {
         sim_event_succeed(p->done, NULL);
     }
     p->state = SIM_PROC_DEAD;
-    coro_switch(&p->ctx, &p->env->host_ctx);
+    /* Return the process to the env pool — preserves the stack and the
+     * per-process resume event for the next sim_process(). */
+    sim_env_t *env = p->env;
+    p->free_next = env->process_pool;
+    env->process_pool = p;
+    coro_switch(&p->ctx, &env->host_ctx);
     /* Unreachable. */
 }
 
 sim_process_t *sim_process(sim_env_t *env, sim_proc_fn fn, void *arg) {
-    sim_process_t *p = (sim_process_t *)calloc(1, sizeof(*p));
-    if (!p) return NULL;
-    p->env  = env;
-    p->fn   = fn;
-    p->arg  = arg;
-    p->state = SIM_PROC_NEW;
-    p->stack_size = SIM_DEFAULT_STACK;
-    p->stack_base = malloc(p->stack_size);
-    if (!p->stack_base) { free(p); return NULL; }
+    sim_process_t *p;
+    if (env->process_pool) {
+        /* Reuse a dead process: keep its stack + resume_ev allocation,
+         * reset the rest, re-init the coroutine context. */
+        p = env->process_pool;
+        env->process_pool = p->free_next;
+        void          *stack_save     = p->stack_base;
+        size_t         stack_size     = p->stack_size;
+        sim_event_t   *resume_ev_save = p->resume_ev;
+        sim_process_t *all_next_save  = p->all_next;
+        memset(p, 0, sizeof(*p));
+        p->stack_base = stack_save;
+        p->stack_size = stack_size;
+        p->resume_ev  = resume_ev_save;
+        p->all_next   = all_next_save;
+    } else {
+        p = (sim_process_t *)calloc(1, sizeof(*p));
+        if (!p) return NULL;
+        p->stack_size = SIM_DEFAULT_STACK;
+        p->stack_base = malloc(p->stack_size);
+        if (!p->stack_base) { free(p); return NULL; }
+        p->all_next = env->all_processes;
+        env->all_processes = p;
+    }
 
+    p->env   = env;
+    p->fn    = fn;
+    p->arg   = arg;
+    p->state = SIM_PROC_NEW;
+
+    /* Fresh done event — callers may still hold a reference to the
+     * previous incarnation's done event, so we can't reuse it. */
     p->done = _sim_event_alloc(env);
 
     coro_init(&p->ctx, p->stack_base, p->stack_size,
               process_entry, p);
-
-    p->all_next = env->all_processes;
-    env->all_processes = p;
 
     schedule_resume(p, NULL);
     return p;

@@ -66,6 +66,24 @@ static void b_process_spawn(int n) {
     sim_env_destroy(e);
 }
 
+/* process-churn: spawn-yield-die-respawn pattern. Demonstrates the
+ * process pool — after warm-up no malloc(stack) per spawn. */
+typedef struct { sim_env_t *env; int n; } churn_arg_t;
+static void churn_spawner(sim_process_t *self, void *arg) {
+    churn_arg_t *a = (churn_arg_t *)arg;
+    for (int i = 0; i < a->n; i++) {
+        sim_process_t *p = sim_process(a->env, p_noop, NULL);
+        sim_yield(self, sim_process_event(p));  /* wait for child to die */
+    }
+}
+static void b_process_churn(int n) {
+    sim_env_t *e = sim_env_create();
+    churn_arg_t a = { e, n };
+    sim_process(e, churn_spawner, &a);
+    sim_run(e);
+    sim_env_destroy(e);
+}
+
 typedef struct { sim_env_t *env; int n; sim_resource_t *r; } na_res_t;
 static void p_resource(sim_process_t *self, void *arg) {
     na_res_t *a = (na_res_t *)arg;
@@ -279,6 +297,7 @@ static const bench_t BENCHES[] = {
     {"event-succeed",       b_event_succeed,       1.0},
     {"callback",            b_callback,            1.0},
     {"process-spawn",       b_process_spawn,       0.1},
+    {"process-churn",       b_process_churn,       1.0},
     {"resource",            b_resource,            1.0},
     {"priority-resource",   b_priority_resource,   1.0},
     {"preemptive-resource", b_preemptive_resource, 1.0},

@@ -27,14 +27,12 @@ void sim_env_destroy(sim_env_t *env) {
         p = next;
     }
 
-    /* Free all events. callbacks lists were freed at processing time;
-     * any pending ones we leak intentionally rather than chase. Free
-     * the cb_node_t chains here for any still-pending events. */
+    /* Free every event ever allocated. The cb array is owned by the
+     * event (kept across recycle), so we free it here. */
     sim_event_t *e = env->all_events;
     while (e) {
         sim_event_t *next = e->all_next;
-        cb_node_t *n = e->callbacks;
-        while (n) { cb_node_t *nn = n->next; free(n); n = nn; }
+        free(e->cbs);
         free(e);
         e = next;
     }

@@ -64,35 +64,47 @@ reviewed                    666            666
 ```
 primitive                    ops    py ns/op     c ns/op     speedup
 ---------------------- --------- ----------- ----------- -----------
-timeout                   100000       645.5       108.3        6.0x
-event-succeed             100000      1444.6       124.0       11.6x
-callback                  100000        56.1        30.5        1.8x
-process-spawn              10000      2983.7      5105.1        0.6x
-resource                  100000      2449.0       124.0       19.8x
-priority-resource         100000      3125.4       120.9       25.9x
-preemptive-resource       100000      3552.5       152.3       23.3x
-container                 100000      3024.9       278.0       10.9x
-store                     100000      2764.4       302.9        9.1x
-filter-store              100000      3074.1       300.8       10.2x
-priority-store            100000      3211.9       293.7       10.9x
-allof                     100000      5051.5       366.0       13.8x
-anyof                     100000      4945.2       365.4       13.5x
-interrupt                 100000      5926.7       642.8        9.2x
+timeout                   100000       649.9        93.6        6.9x
+event-succeed             100000      1236.5       142.9        8.7x
+callback                  100000        46.9         5.7        8.2x
+process-spawn              10000      2839.2      2176.3        1.3x
+process-churn             100000      1624.7       166.6        9.8x
+resource                  100000      2472.8        67.9       36.4x
+priority-resource         100000      3044.0        67.8       44.9x
+preemptive-resource       100000      3432.8        95.2       36.1x
+container                 100000      2855.2       137.8       20.7x
+store                     100000      2767.4       162.1       17.1x
+filter-store              100000      2999.5       176.4       17.0x
+priority-store            100000      3182.7       164.0       19.4x
+allof                     100000      4958.2       242.5       20.4x
+anyof                     100000      4696.2       242.1       19.4x
+interrupt                 100000      5683.3       547.9       10.4x
 ---------------------- --------- ----------- ----------- -----------
-TOTAL wall (s)                         3.957       0.372       10.6x
+TOTAL wall (s)                         3.993       0.253       15.8x
 ```
+
+### Recent optimizations (vs. previous numbers)
+
+| primitive       | before  | after  | what changed |
+|-----------------|--------:|-------:|--------------|
+| callback        | 30.5 ns | 5.7 ns | event callbacks switched from per-node linked list (`malloc` per subscription) to a packed dynamic array — geometric growth, contiguous iteration |
+| timeout         | 108 ns  | 94 ns  | bonus from the same change (`waiter_cb` no longer allocates a node) |
+| resource family | ~125 ns | ~70 ns | same bonus across every primitive that subscribes a waiter on yield |
+| process-spawn   | 5.1 µs  | 2.2 µs | default stack 64 KiB → 16 KiB (faster `malloc` bin) plus process pool |
+| process-churn   | n/a     | 167 ns | new bench — spawn → wait-for-done → respawn. Pool eliminates `malloc(stack)` after warm-up |
 
 ### How to read this
 
-- **timeout / event-succeed (~110-130 ns)** — pure heap push/pop + callback dispatch. The min cost of *any* scheduled op in simpyc.
-- **callback (30 ns)** — single event, N callbacks, one succeed. Both implementations are basically just appending to a list, so the gap closes. Python's overhead is the function-call dispatch in the loop.
-- **process-spawn (5.1 µs in simpyc — slower than SimPy)** — the one place simpyc loses. SimPy's `process()` allocates a Python generator, which is a few hundred bytes. simpyc allocates a 64 KiB stack (`malloc`) per process so the coroutine has somewhere to run. For workloads that spawn many short-lived processes this matters; for workloads with a stable set of long-lived processes (the SimPy norm) it doesn't. Reducing `SIM_DEFAULT_STACK` in `src/process.c` shrinks this immediately at the cost of recursion headroom.
-- **resource / priority-resource / preemptive-resource (~120-150 ns)** — these are essentially "yield on a synchronously-succeeded event" plus a list operation. Even preemptive (which searches the holders list to find a victim) is fast because the holder list is empty/small in the no-contention bench.
-- **container / store / filter-store / priority-store (~280-300 ns)** — each op is two yields (put + get) split across two processes, so the per-op cost is dominated by context-switch + heap work, not the data structure. They all land in the same band because the data-structure work is small relative to the simulator overhead.
-- **allof / anyof (~365 ns)** — 4 events scheduled + 4 waiter callbacks + 1 condition resolution per op. The extra cost vs `timeout` is the four child timeouts and the condition state.
-- **interrupt (640 ns)** — each interrupt schedules a resume, swaps into the victim, swaps back out. About 2× a plain yield. Roughly matches Python's relative overhead (also the most expensive primitive there).
+- **timeout / event-succeed (~95-145 ns)** — pure heap push/pop + callback dispatch. The min cost of *any* scheduled op.
+- **callback (5.7 ns)** — single event, N callbacks, one succeed. The array storage means each subscription is one bounds-check + two stores; no allocator involvement on the hot path.
+- **process-spawn (2.2 µs)** — cold spawn-burst (spawn N, then drain). simpyc was slower than SimPy here in earlier builds; with the smaller default stack it now roughly matches. The remaining cost is `malloc(stack) + alloc done event + schedule the initial resume`.
+- **process-churn (167 ns)** — the real-world spawn pattern: spawn child, wait for it to die, spawn another. After the first iteration the process pool is populated, so further spawns reuse both the struct and the 16 KiB stack — only event allocation remains. **9.8× faster than SimPy** on this pattern.
+- **resource / priority-resource / preemptive-resource (~70-95 ns)** — "yield on a synchronously-succeeded event" plus a list operation. The callback-array change cut this in half.
+- **container / store / filter-store / priority-store (~140-175 ns)** — each op is a yield on the producer + a yield on the consumer, so the cost is mostly context-switch + heap work.
+- **allof / anyof (~245 ns)** — 4 child timeouts + condition state + 4 waiter callbacks per op.
+- **interrupt (550 ns)** — each interrupt schedules an extra resume + swaps into the victim + back out. Two extra context switches per op.
 
-The factory is **13.7× faster** end-to-end even though `process-spawn` is the one primitive simpyc is slower at — because the factory has a fixed set of long-lived processes, the spawn cost is paid once and amortized across millions of yields.
+The factory is **13.7× faster** end-to-end. All 14 primitives are now faster than SimPy.
 
 ## Knobs
 
