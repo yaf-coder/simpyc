@@ -1,12 +1,16 @@
 /* Processes: each runs on its own stack via the coro library.
  *
  * Lifecycle:
- *   sim_process()      -> alloc + coro_init; immediately scheduled to run.
- *   first dispatch     -> trampoline runs user fn until it yields.
- *   sim_yield(self,e)  -> subscribe callback resume_cb to e; switch out.
- *   resume_cb fires    -> coro_switch back into the process from host.
- *   user fn returns    -> succeed `done`; switch out permanently.
- */
+ *   sim_process()           -> alloc + coro_init; immediately scheduled to run.
+ *   first dispatch          -> trampoline runs user fn until it yields.
+ *   sim_yield(self,e)       -> subscribe waiter_cb to e; switch out.
+ *   waiter_cb fires         -> schedule_resume(p); pops; resume_cb switches in.
+ *   sim_process_interrupt() -> schedule_resume(p) with cause, clear yielded.
+ *   user fn returns         -> succeed `done`; switch out permanently.
+ *
+ * Each process owns a single reusable resume event (resume_ev). When a
+ * resume is already pending we coalesce instead of allocating a new
+ * event — keeps the per-yield allocation count at zero in steady state. */
 
 #include "internal.h"
 
@@ -29,21 +33,38 @@ static void resume_cb(sim_event_t *ev, void *user) {
 }
 
 /* When a yielded event fires, schedule the waiting process for resume
- * with the event's value. */
+ * with the event's value. Skip if the process has moved on (e.g. was
+ * interrupted before this fired). */
 static void waiter_cb(sim_event_t *ev, void *user) {
     sim_process_t *p = (sim_process_t *)user;
     if (p->state == SIM_PROC_DEAD) return;
+    if (p->yielded != ev) return;     /* stale callback */
     schedule_resume(p, sim_event_value(ev));
 }
 
-/* Schedule the process for resumption at current time, normal priority.
+/* Schedule the process for resumption at current time.
+ *
  * The resume event is internal — the user never sees it — so it's
- * always recyclable. */
+ * recycled in place across yields. If a resume is already pending we
+ * coalesce (the second call wins on resume_value). */
 static void schedule_resume(sim_process_t *p, void *value) {
     p->resume_value = value;
-    sim_event_t *r = _sim_event_alloc(p->env);
+    sim_event_t *r = p->resume_ev;
+    if (r && r->state == SIM_EV_TRIGGERED) {
+        /* Already pending — value updated, nothing else to do. */
+        return;
+    }
+    if (!r) {
+        r = _sim_event_alloc(p->env);
+        p->resume_ev = r;
+    } else {
+        /* Recycle in place: callbacks list is already empty. */
+        r->state       = SIM_EV_PENDING;
+        r->ok          = 1;
+        r->value       = NULL;
+        r->fail_reason = NULL;
+    }
     r->state = SIM_EV_TRIGGERED;
-    r->recyclable = 1;
     sim_event_on(r, resume_cb, p);
     _sim_event_schedule(r, 0.0, SIM_PRIO_NORMAL);
 }
@@ -53,13 +74,12 @@ static void process_entry(void *arg) {
     sim_process_t *p = (sim_process_t *)arg;
     p->state = SIM_PROC_RUNNING;
     p->fn(p, p->arg);
-    /* Body returned: trigger done event and switch back permanently. */
     if (!sim_event_triggered(p->done)) {
         sim_event_succeed(p->done, NULL);
     }
     p->state = SIM_PROC_DEAD;
     coro_switch(&p->ctx, &p->env->host_ctx);
-    /* Unreachable; the host won't switch back in. */
+    /* Unreachable. */
 }
 
 sim_process_t *sim_process(sim_env_t *env, sim_proc_fn fn, void *arg) {
@@ -78,11 +98,9 @@ sim_process_t *sim_process(sim_env_t *env, sim_proc_fn fn, void *arg) {
     coro_init(&p->ctx, p->stack_base, p->stack_size,
               process_entry, p);
 
-    /* Link into the env's all-list for destroy. */
     p->all_next = env->all_processes;
     env->all_processes = p;
 
-    /* Kick: schedule first run at now. */
     schedule_resume(p, NULL);
     return p;
 }
@@ -92,12 +110,39 @@ sim_event_t *sim_process_event(sim_process_t *p) { return p->done; }
 void *sim_yield(sim_process_t *self, sim_event_t *evt) {
     self->yielded = evt;
     if (sim_event_processed(evt)) {
-        /* Already done — schedule self-resume directly with the value. */
         schedule_resume(self, sim_event_value(evt));
     } else {
-        /* Subscribe; waiter_cb will schedule us when evt fires. */
         sim_event_on(evt, waiter_cb, self);
     }
     coro_switch(&self->ctx, &self->env->host_ctx);
+
+    /* Resumed. Clear waiting state; surface interrupt if any. */
+    self->yielded = NULL;
+    if (self->interrupt_pending) {
+        self->interrupt_pending = 0;
+        self->was_interrupted   = 1;
+        void *cause = self->interrupt_cause;
+        self->interrupt_cause = NULL;
+        return cause;
+    }
+    self->was_interrupted = 0;
     return self->resume_value;
+}
+
+void sim_process_interrupt(sim_process_t *p, void *cause) {
+    if (!p || p->state == SIM_PROC_DEAD) return;
+    if (p->interrupt_pending) return;          /* coalesce */
+    p->interrupt_pending = 1;
+    p->interrupt_cause   = cause;
+    /* Cancel any pending wait; the old event's later fire will see
+     * yielded != ev and skip. */
+    p->yielded = NULL;
+    schedule_resume(p, cause);
+}
+
+int   sim_process_was_interrupted(const sim_process_t *self) {
+    return self ? (int)self->was_interrupted : 0;
+}
+void *sim_process_interrupt_cause(const sim_process_t *self) {
+    return self ? self->interrupt_cause : NULL;
 }

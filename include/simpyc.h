@@ -13,12 +13,16 @@
 extern "C" {
 #endif
 
-typedef struct sim_env       sim_env_t;
-typedef struct sim_event     sim_event_t;
-typedef struct sim_process   sim_process_t;
-typedef struct sim_resource  sim_resource_t;
-typedef struct sim_container sim_container_t;
-typedef struct sim_store     sim_store_t;
+typedef struct sim_env                  sim_env_t;
+typedef struct sim_event                sim_event_t;
+typedef struct sim_process              sim_process_t;
+typedef struct sim_resource             sim_resource_t;
+typedef struct sim_priority_resource    sim_priority_resource_t;
+typedef struct sim_preemptive_resource  sim_preemptive_resource_t;
+typedef struct sim_container            sim_container_t;
+typedef struct sim_store                sim_store_t;
+typedef struct sim_filter_store         sim_filter_store_t;
+typedef struct sim_priority_store       sim_priority_store_t;
 
 /* Heap priority levels. Lower value = earlier dispatch at same time. */
 #define SIM_PRIO_URGENT  0
@@ -85,8 +89,22 @@ sim_process_t *sim_process(sim_env_t *env, sim_proc_fn fn, void *arg);
 sim_event_t *sim_process_event(sim_process_t *p);
 
 /* Suspend `self` until `evt` is processed, then resume. Returns the
- * event's value pointer (== sim_event_value(evt)). */
+ * event's value pointer (== sim_event_value(evt)) on normal wake-up,
+ * or the interrupt cause if the process was interrupted while waiting.
+ * Call sim_process_was_interrupted(self) to distinguish. */
 void *sim_yield(sim_process_t *self, sim_event_t *evt);
+
+/* Interrupt a process: schedule it for immediate resume regardless of
+ * the event it was waiting on. The originally-yielded event's later
+ * firing is ignored. No-op for finished processes. `cause` is opaque
+ * user data, retrievable inside the process via sim_process_interrupt_cause. */
+void  sim_process_interrupt(sim_process_t *p, void *cause);
+
+/* 1 if the most recent sim_yield returned because of an interrupt
+ * rather than the yielded event firing. The flag is cleared on the
+ * next call to sim_yield. */
+int   sim_process_was_interrupted(const sim_process_t *self);
+void *sim_process_interrupt_cause(const sim_process_t *self);
 
 /* --- Conditions ------------------------------------------------------ */
 
@@ -110,6 +128,38 @@ int             sim_resource_count(const sim_resource_t *r);     /* in use */
 int             sim_resource_capacity(const sim_resource_t *r);
 int             sim_resource_queue_len(const sim_resource_t *r); /* waiting */
 
+/* --- PriorityResource (priority-ordered FIFO queue) ----------------- */
+
+/* Smaller `priority` = served sooner. Ties broken by request order. */
+sim_priority_resource_t *sim_priority_resource_create(sim_env_t *env, int capacity);
+void          sim_priority_resource_destroy(sim_priority_resource_t *r);
+sim_event_t  *sim_priority_resource_request(sim_priority_resource_t *r, int priority);
+void          sim_priority_resource_release(sim_priority_resource_t *r, sim_event_t *req);
+int           sim_priority_resource_count(const sim_priority_resource_t *r);
+int           sim_priority_resource_capacity(const sim_priority_resource_t *r);
+int           sim_priority_resource_queue_len(const sim_priority_resource_t *r);
+
+/* --- PreemptiveResource (PriorityResource + preemption) ------------- */
+
+/* Like PriorityResource, but a request with `preempt=1` may evict a
+ * current holder with a worse (larger) priority. The evicted holder's
+ * process is interrupted; the cause is the new requester's req event. */
+sim_preemptive_resource_t *sim_preemptive_resource_create(sim_env_t *env, int capacity);
+void          sim_preemptive_resource_destroy(sim_preemptive_resource_t *r);
+
+/* `requester` is the process that will own this request (needed so
+ * the preemption path can interrupt it). May be NULL if you don't
+ * need preemption against this holder. */
+sim_event_t  *sim_preemptive_resource_request(sim_preemptive_resource_t *r,
+                                              sim_process_t *requester,
+                                              int priority,
+                                              int preempt);
+void          sim_preemptive_resource_release(sim_preemptive_resource_t *r,
+                                              sim_event_t *req);
+int           sim_preemptive_resource_count(const sim_preemptive_resource_t *r);
+int           sim_preemptive_resource_capacity(const sim_preemptive_resource_t *r);
+int           sim_preemptive_resource_queue_len(const sim_preemptive_resource_t *r);
+
 /* --- Container (continuous level) ----------------------------------- */
 
 sim_container_t *sim_container_create(sim_env_t *env,
@@ -128,6 +178,46 @@ void         sim_store_destroy(sim_store_t *s);
 sim_event_t *sim_store_put(sim_store_t *s, void *item);
 sim_event_t *sim_store_get(sim_store_t *s);   /* event value() is the item */
 int          sim_store_count(const sim_store_t *s);
+
+/* --- FilterStore (Store with predicate-based get) ------------------ */
+
+/* Filter callback: return non-zero to accept the item. `user` is the
+ * cookie passed to sim_filter_store_get. */
+typedef int (*sim_store_filter_fn)(void *item, void *user);
+
+sim_filter_store_t *sim_filter_store_create(sim_env_t *env, int capacity);
+void         sim_filter_store_destroy(sim_filter_store_t *s);
+sim_event_t *sim_filter_store_put(sim_filter_store_t *s, void *item);
+
+/* Returns an event whose value, on success, is the first item for
+ * which filter(item, user) returned non-zero. If `filter` is NULL,
+ * any item matches (equivalent to plain Store.get). */
+sim_event_t *sim_filter_store_get(sim_filter_store_t *s,
+                                  sim_store_filter_fn filter, void *user);
+int          sim_filter_store_count(const sim_filter_store_t *s);
+
+/* --- PriorityStore (priority-ordered Store) ------------------------- */
+
+/* Items put with a priority; get returns the lowest-priority value
+ * first (smaller value = higher priority, matching SimPy). */
+sim_priority_store_t *sim_priority_store_create(sim_env_t *env, int capacity);
+void         sim_priority_store_destroy(sim_priority_store_t *s);
+sim_event_t *sim_priority_store_put(sim_priority_store_t *s,
+                                    int priority, void *item);
+sim_event_t *sim_priority_store_get(sim_priority_store_t *s);
+int          sim_priority_store_count(const sim_priority_store_t *s);
+
+/* --- Realtime environment ------------------------------------------- */
+
+/* Enable real-time pacing on `env`. `factor` is wall seconds per
+ * simulation time unit (factor=1.0 ⇒ 1 sim sec == 1 wall sec). If
+ * `strict` is non-zero, sim_run aborts (returns early) when the
+ * scheduler falls behind real time.
+ *
+ * Call with factor=0 to disable. The wall-clock reference is reset
+ * each time this is called. */
+void  sim_env_set_realtime(sim_env_t *env, double factor, int strict);
+int   sim_env_realtime_lagged(const sim_env_t *env);  /* 1 if strict run aborted */
 
 #ifdef __cplusplus
 }

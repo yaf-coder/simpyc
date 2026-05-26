@@ -2,8 +2,10 @@
 
 #include "internal.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 sim_env_t *sim_env_create(void) {
     sim_env_t *env = (sim_env_t *)calloc(1, sizeof(*env));
@@ -50,13 +52,60 @@ int sim_peek(const sim_env_t *env, double *out_time) {
     return 0;
 }
 
+static double wall_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static void wall_sleep_until(double target) {
+    for (;;) {
+        double dt = target - wall_now();
+        if (dt <= 0) return;
+        struct timespec req;
+        req.tv_sec  = (time_t)dt;
+        req.tv_nsec = (long)((dt - (double)req.tv_sec) * 1e9);
+        if (nanosleep(&req, NULL) == 0) return;
+        if (errno != EINTR) return;
+    }
+}
+
 int sim_step(sim_env_t *env) {
     heap_entry_t he;
-    if (heap_pop(&env->heap, &he) < 0) return -1;
+    if (heap_peek(&env->heap, &he) < 0) return -1;
+
+    /* Realtime pacing: align wall clock with sim clock before
+     * processing the next event. */
+    if (env->rt_factor > 0.0) {
+        double target = env->rt_start_wall
+                      + (he.time - env->rt_start_sim) * env->rt_factor;
+        double wall = wall_now();
+        if (wall < target) {
+            wall_sleep_until(target);
+        } else if (env->rt_strict && (wall - target) > 0.0) {
+            /* Behind schedule and strict mode: bail out. */
+            env->rt_lagged = 1;
+            return -1;
+        }
+    }
+
+    heap_pop(&env->heap, &he);
     env->now = he.time;
     _sim_event_run_callbacks(he.event);
     return 0;
 }
+
+void sim_env_set_realtime(sim_env_t *env, double factor, int strict) {
+    env->rt_factor = factor;
+    env->rt_strict = strict;
+    env->rt_lagged = 0;
+    if (factor > 0.0) {
+        env->rt_start_wall = wall_now();
+        env->rt_start_sim  = env->now;
+    }
+}
+
+int sim_env_realtime_lagged(const sim_env_t *env) { return env->rt_lagged; }
 
 size_t sim_run(sim_env_t *env) {
     size_t n = 0;

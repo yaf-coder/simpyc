@@ -75,10 +75,14 @@ struct sim_process {
     void        *stack_base;     /* malloc'd; freed on death */
     size_t       stack_size;
     sim_event_t *done;           /* fired when process exits */
-    sim_event_t *yielded;        /* event we're currently waiting on */
+    sim_event_t *yielded;        /* event we're currently waiting on; NULL when not waiting */
+    sim_event_t *resume_ev;      /* reused per-process resume event */
     void        *resume_value;   /* set just before resume */
+    void        *interrupt_cause;
     uint8_t      state;
-    uint8_t      pad[7];
+    uint8_t      interrupt_pending;
+    uint8_t      was_interrupted;  /* set to 1 just before resume from interrupt */
+    uint8_t      pad[5];
     struct sim_process *free_next;
     struct sim_process *all_next; /* list of all live processes for cleanup */
 };
@@ -102,6 +106,13 @@ struct sim_env {
     /* tracking for cleanup */
     sim_process_t *all_processes;
     sim_event_t   *all_events;
+
+    /* realtime mode (factor > 0 enables; wall seconds per sim unit) */
+    double         rt_factor;
+    int            rt_strict;
+    int            rt_lagged;
+    double         rt_start_wall;
+    double         rt_start_sim;
 };
 
 /* --- Internal event helpers --------------------------------------- */

@@ -31,8 +31,12 @@ LIB_SRCS := \
   src/process.c \
   src/cond.c \
   src/resource.c \
+  src/priority_resource.c \
+  src/preemptive_resource.c \
   src/container.c \
   src/store.c \
+  src/filter_store.c \
+  src/priority_store.c \
   src/coro.c
 
 LIB_OBJS := $(LIB_SRCS:.c=.o) $(CORO_ASM:.S=.o)
