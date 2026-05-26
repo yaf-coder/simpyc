@@ -301,6 +301,51 @@ static void test_realtime(void) {
     sim_env_destroy(env);
 }
 
+/* ---- 7. Lazy done event ---- */
+static void quick_proc(sim_process_t *self, void *arg) {
+    sim_env_t *env = (sim_env_t *)arg;
+    sim_yield(self, sim_timeout(env, 1.0));
+}
+
+static int waiter_woke;
+static void waiter_proc(sim_process_t *self, void *arg) {
+    sim_process_t *child = (sim_process_t *)arg;
+    sim_yield(self, sim_process_event(child));  /* lazy alloc here */
+    waiter_woke = 1;
+}
+
+static void test_lazy_done_waited(void) {
+    /* Spawn child, ask for its event BEFORE it exits, then yield. */
+    sim_env_t *env = sim_env_create();
+    sim_process_t *child = sim_process(env, quick_proc, env);
+    waiter_woke = 0;
+    sim_process(env, waiter_proc, child);
+    sim_run(env);
+    CHECK(waiter_woke == 1);
+    sim_env_destroy(env);
+}
+
+static void test_lazy_done_after_exit(void) {
+    /* Spawn child, run sim until child exits, THEN ask for its event.
+     * Should return a pre-succeeded event. */
+    sim_env_t *env = sim_env_create();
+    sim_process_t *child = sim_process(env, quick_proc, env);
+    sim_run(env);     /* child runs to completion (lazy: never asked) */
+    sim_event_t *done = sim_process_event(child);
+    CHECK(done != NULL);
+    CHECK(sim_event_triggered(done));    /* succeeded immediately */
+    sim_env_destroy(env);
+}
+
+static void test_lazy_done_never_asked(void) {
+    /* Fire-and-forget: spawn many, never call sim_process_event. The
+     * test just has to complete without crashing. */
+    sim_env_t *env = sim_env_create();
+    for (int i = 0; i < 100; i++) sim_process(env, quick_proc, env);
+    sim_run(env);
+    sim_env_destroy(env);
+}
+
 int main(void) {
     test_interrupt();
     test_priority_resource();
@@ -309,6 +354,9 @@ int main(void) {
     test_filter_store_waiter();
     test_priority_store();
     test_realtime();
+    test_lazy_done_waited();
+    test_lazy_done_after_exit();
+    test_lazy_done_never_asked();
     printf("OK\n");
     return 0;
 }

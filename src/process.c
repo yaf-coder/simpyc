@@ -78,7 +78,9 @@ static void process_entry(void *arg) {
     sim_process_t *p = (sim_process_t *)arg;
     p->state = SIM_PROC_RUNNING;
     p->fn(p, p->arg);
-    if (!sim_event_triggered(p->done)) {
+    /* Only succeed `done` if someone asked for it. Fire-and-forget
+     * processes never allocate the event in the first place. */
+    if (p->done && !sim_event_triggered(p->done)) {
         sim_event_succeed(p->done, NULL);
     }
     p->state = SIM_PROC_DEAD;
@@ -121,10 +123,7 @@ sim_process_t *sim_process(sim_env_t *env, sim_proc_fn fn, void *arg) {
     p->fn    = fn;
     p->arg   = arg;
     p->state = SIM_PROC_NEW;
-
-    /* Fresh done event — callers may still hold a reference to the
-     * previous incarnation's done event, so we can't reuse it. */
-    p->done = _sim_event_alloc(env);
+    /* p->done stays NULL: allocated lazily on first sim_process_event(). */
 
     coro_init(&p->ctx, p->stack_base, p->stack_size,
               process_entry, p);
@@ -133,7 +132,17 @@ sim_process_t *sim_process(sim_env_t *env, sim_proc_fn fn, void *arg) {
     return p;
 }
 
-sim_event_t *sim_process_event(sim_process_t *p) { return p->done; }
+sim_event_t *sim_process_event(sim_process_t *p) {
+    if (!p->done) {
+        p->done = _sim_event_alloc(p->env);
+        /* If the process already finished before anyone asked for its
+         * event, fire it immediately so a yield resolves promptly. */
+        if (p->state == SIM_PROC_DEAD) {
+            sim_event_succeed(p->done, NULL);
+        }
+    }
+    return p->done;
+}
 
 void *sim_yield(sim_process_t *self, sim_event_t *evt) {
     self->yielded = evt;
